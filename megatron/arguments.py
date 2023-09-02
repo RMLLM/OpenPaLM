@@ -363,6 +363,10 @@ def _add_network_size_args(parser):
                        'attention. This is set to '
                        '   args.hidden_size // args.num_attention_heads '
                        'if not provided.')
+    group.add_argument('--attention-head-type', type=str, default=None,
+                       choices=['multihead', 'multiquery'],
+                       help='Type of attention heads. `multihead` is the standard multi-head attention.'
+                       '`multiquery` shares the values and keys across attention heads')
     group.add_argument('--max-position-embeddings', type=int, default=None,
                        help='Maximum number of position embeddings to use. '
                        'This is the size of position embedding.')
@@ -549,6 +553,9 @@ def _add_training_args(parser):
     group.add_argument('--no-bias-dropout-fusion', action='store_false',
                        help='Disable bias and dropout fusion.',
                        dest='bias_dropout_fusion')
+    group.add_argument('--use-flash-attn', action='store_true',
+                       help='use FlashAttention implementation of attention. '
+                       'https://arxiv.org/abs/2205.14135')
     group.add_argument('--optimizer', type=str, default='adam',
                        choices=['adam', 'sgd'],
                        help='Optimizer function')

@@ -26,7 +26,7 @@ from megatron.enums import AttnMaskType, LayerType, AttnType, PositionEmbeddingT
 from megatron.model.fused_layer_norm import MixedFusedLayerNorm as LayerNorm
 from megatron.model.fused_softmax import FusedScaleMaskSoftmax
 from megatron.model.fused_bias_gelu import bias_gelu_impl
-from megatron.model.utils import attention_mask_func, openai_gelu, erf_gelu
+from megatron.model.utils import attention_mask_func, openai_gelu, erf_gelu, get_linear_layer
 
 import deepspeed
 
@@ -40,6 +40,23 @@ torch._C._jit_override_can_fuse_on_cpu(True)
 torch._C._jit_override_can_fuse_on_gpu(True)
 
 logger = logging.get_logger(__name__)
+
+try:
+    from einops import rearrange
+except ImportError:
+    rearrange = None
+
+try:
+    import flash_attn as _flash_attn
+    if Version(getattr(_flash_attn, "__version__", "1")) >= Version("2"):
+        from flash_attn.flash_attn_interface import flash_attn_func
+        FLASH_VERSION = 2
+    else:
+        from flash_attn.flash_attn_interface import flash_attn_unpadded_func
+        FLASH_VERSION = 1
+except ImportError:
+    FLASH_VERSION = None
+
 
 """ We use the following notation throughout this file:
      h: hidden size
@@ -113,6 +130,89 @@ class ParallelMLP(MegatronModule):
         return output, output_bias
 
 
+class FlashSelfAttention(torch.nn.Module):
+    """Implement the scaled dot product attention with softmax.
+    Arguments
+    ---------
+        softmax_scale: The temperature to use for the softmax attention.
+                      (default: 1/sqrt(d_keys) where d_keys is computed at
+                      runtime)
+        attention_dropout: The dropout rate to apply to the attention
+                           (default: 0.0)
+    """
+    def __init__(self, causal=False, softmax_scale=None, attention_dropout=0.0,
+                 device=None, dtype=None):
+        super().__init__()
+        assert FLASH_VERSION is not None, ('Please install FlashAttention first, '
+                                                      'e.g., with pip install flash-attn')
+        assert rearrange is not None, 'Please install einops first, e.g., with pip install einops'
+        self.causal = causal
+        self.softmax_scale = softmax_scale
+        self.dropout_p = attention_dropout
+
+    def forward(self, q, k, v):
+        """Implements the multihead softmax attention.
+        Arguments
+        ---------
+            q, k, v: The tensor containing the query, key, and value. (B, S, H, D)
+        """
+        assert all((i.dtype in [torch.float16, torch.bfloat16] for i in (q,k,v)))
+        assert all((i.is_cuda for i in (q,k,v)))
+
+        if FLASH_VERSION==1:
+            return self._forward_v1(q,k,v)
+
+        seqlen_q, seqlen_k = q.shape[1], k.shape[1]
+
+        if self.training:
+            # during training q,k,v always have same seqlen
+            assert seqlen_k == seqlen_q
+            is_causal = self.causal
+            dropout_p = self.dropout_p
+        else:
+            # turn off FA causal mask after first inference autoregressive iteration
+            # only on first autoregressive step q,k,v have same seqlen
+            is_causal = self.causal and (seqlen_q == seqlen_k)
+            dropout_p = 0
+
+        output = flash_attn_func(q, k, v, dropout_p,softmax_scale=self.softmax_scale, causal=is_causal)
+
+        return output
+
+
+    def _forward_v1(self, q, k, v):
+        batch_size, seqlen_q = q.shape[0], q.shape[1]
+        seqlen_k = k.shape[1]
+
+        q, k, v = [rearrange(x, 'b s ... -> (b s) ...') for x in [q, k, v]]
+        cu_seqlens_q = torch.arange(0, (batch_size + 1) * seqlen_q, step=seqlen_q, dtype=torch.int32,
+                                    device=q.device)
+
+        if self.training:
+            # during training q,k,v always have same seqlen
+            assert seqlen_k == seqlen_q
+
+            is_causal = self.causal
+            cu_seqlens_k = cu_seqlens_q
+            dropout_p = self.dropout_p
+        else:
+            # turn off FA causal mask after first inference autoregressive iteration
+            # only on first autoregressive step q,k,v have same seqlen
+            is_causal = self.causal and (seqlen_q == seqlen_k)
+            cu_seqlens_k = torch.arange(0, (batch_size + 1) * seqlen_k, step=seqlen_k, dtype=torch.int32,
+                        device=q.device)
+            dropout_p = 0
+
+        output = flash_attn_unpadded_func(
+            q, k, v, cu_seqlens_q, cu_seqlens_k, seqlen_q, seqlen_k,
+            dropout_p,
+            softmax_scale=self.softmax_scale, causal=is_causal
+        )
+
+        output = rearrange(output, '(b s) ... -> b s ...', b=batch_size)
+        return output
+
+
 class ParallelAttention(MegatronModule):
     """Parallel self-attention layer abstract class.
 
@@ -137,6 +237,8 @@ class ParallelAttention(MegatronModule):
         self.layer_number = max(1, layer_number)
         self.attention_type = attention_type
         self.attn_mask_type = attn_mask_type
+        self.attention_head_type = args.attention_head_type
+        self.use_flash_attn = args.use_flash_attn
 
         projection_size = args.kv_channels * args.num_attention_heads
 
@@ -150,14 +252,28 @@ class ParallelAttention(MegatronModule):
             args.num_attention_heads, world_size)
 
         # Strided linear layer.
-        if attention_type == AttnType.self_attn:
+        if attention_type == AttnType.self_attn and self.attention_head_type == 'multihead':
             self.query_key_value = mpu.ColumnParallelLinear(
                 args.hidden_size,
                 3 * projection_size,
                 gather_output=False,
                 init_method=init_method)
-        else:
-            assert attention_type == AttnType.cross_attn
+        elif attention_type == AttnType.self_attn and self.attention_head_type == 'multiquery':
+            # TODO: Find a way to merge the query and key-value computations?
+            self.query = mpu.ColumnParallelLinear(
+                args.hidden_size,
+                projection_size,
+                gather_output=False,
+                init_method=init_method)
+            # In MultiQuery attention, keys and values are shared across heads
+            # Use args.kv_channels instead of projection_size
+            # No `.fork()` so the rng tracker is shared across tensor-parallel processes.
+            # with mpu.get_cuda_rng_tracker():
+            self.key_value = get_linear_layer(
+                args.hidden_size,
+                2 * args.kv_channels,
+                init_method=init_method)
+        elif attention_type == AttnType.cross_attn and self.attention_head_type == 'multihead':
             self.query = mpu.ColumnParallelLinear(
                 args.hidden_size,
                 projection_size,
@@ -169,6 +285,27 @@ class ParallelAttention(MegatronModule):
                 2 * projection_size,
                 gather_output=False,
                 init_method=init_method)
+        elif attention_type == AttnType.cross_attn and self.attention_head_type == 'multiquery':
+            raise NotImplementedError("Multiquery attention not implemented for cross-attention.")
+        else:
+            raise ValueError(f"Invalid attention arguments: {attention_type}, {self.attention_head_type}")
+
+        if self.use_flash_attn:
+            if FLASH_VERSION is None:
+                raise ImportError('FlashAttention is not installed, please install with '
+                                  'pip install flash-attn')
+            assert attention_type == AttnType.self_attn, ('FlashAttention code path only supports '
+                                                          'self-attention for now')
+            assert self.attn_mask_type == AttnMaskType.causal, ('FlashAttention code path only '
+                                                                'supports causal mask for now')
+            assert args.position_embedding_type != PositionEmbeddingType.alibi, \
+                ('FlashAttention does not support alibi positional embeddings yet')
+            if rearrange is None:
+                raise ImportError('einops is not installed, please install with pip install einops')
+
+            self.core_attention_flash = FlashSelfAttention(
+                causal=True, attention_dropout=args.attention_dropout
+            )
 
         coeff = None
         self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
@@ -213,7 +350,7 @@ class ParallelAttention(MegatronModule):
         # Query, Key, and Value
         # =====================
 
-        if self.attention_type == AttnType.self_attn:
+        if self.attention_type == AttnType.self_attn and self.attention_head_type == 'multihead':
             # Attention heads [sq, b, h] --> [sq, b, (np * 3 * hn)]
             mixed_x_layer, _ = self.query_key_value(hidden_states)
 
@@ -227,6 +364,32 @@ class ParallelAttention(MegatronModule):
             (query_layer,
              key_layer,
              value_layer) = mpu.split_tensor_along_last_dim(mixed_x_layer, 3)
+        elif self.attention_type == AttnType.self_attn and self.attention_head_type == 'multiquery':
+            kv_input=hidden_states
+            # Attention heads [sq, b, h] --> [sq, b, (2 * hn)]
+            mixed_kv_layer = self.key_value(kv_input)
+            mixed_kv_layer = mpu.copy_to_tensor_model_parallel_region(mixed_kv_layer)
+
+            # [sq, b, (2 * hn)] --> [sq, b, np (expanded), 2 * hn]
+            new_tensor_shape = mixed_kv_layer.size()[:-1] + \
+                (1,
+                 2 * self.hidden_size_per_attention_head)
+            # TODO: This should be skippable for flash 2, but getting illegal memory access.
+            mixed_kv_layer = mixed_kv_layer.unsqueeze(2).expand(*new_tensor_shape)
+
+            # [sq, b, np, 2 * hn] --> 2 [sq, b, np, hn]
+            (key_layer,
+             value_layer) = mpu.split_tensor_along_last_dim(mixed_kv_layer, 2)
+
+            # Attention head [sq, b, h] --> [sq, b, np * hn]
+            query_layer, _ = self.query(hidden_states)
+            # [sq, b, np * hn] --> [sq, b, np, hn]
+            new_tensor_shape = query_layer.size()[:-1] + \
+                (self.num_attention_heads_per_partition,
+                 self.hidden_size_per_attention_head)
+            query_layer = query_layer.view(*new_tensor_shape)
+
+            # [sq, b, np, hn] -> [b, np * sq, hn]
         else:
             # Attention heads [sk, b, h] --> [sk, b, (np * 2 * hn)]
             mixed_kv_layer, _ = self.key_value(encoder_output)
@@ -279,17 +442,6 @@ class ParallelAttention(MegatronModule):
         key_layer = key_layer.view(output_size[3],
                                    output_size[0] * output_size[1], -1)
 
-        # preallocting result tensor: [b * np, sq, sk]
-        if alibi is None:
-            matmul_result = torch.empty(
-                output_size[0]*output_size[1],
-                output_size[2],
-                output_size[3],
-                dtype=query_layer.dtype,
-                device=torch.cuda.current_device())
-        else:
-            matmul_result = alibi[:output_size[0]*output_size[1], :, :output_size[3]]
-
         # Rotary embeddings
         if self.position_embedding_type == PositionEmbeddingType.rotary:
             apply_rotary_fn = apply_rotary_pos_emb_torch if self.bf16 else apply_rotary_pos_emb
@@ -301,97 +453,116 @@ class ParallelAttention(MegatronModule):
                 seq_len += offset
             cos, sin = self.rotary_emb(value_layer, seq_len=seq_len)
             query_layer, key_layer = apply_rotary_fn(query_layer, key_layer, cos, sin, offset=offset)
-
-        # Raw attention scores. [b * np, sq, sk]
-        if alibi is None:
-            matmul_result = torch.baddbmm(
-                matmul_result,
-                query_layer.transpose(0, 1),   # [b * np, sq, hn]
-                key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
-                beta=0.0, alpha=(1.0/self.norm_factor))
+        
+        if self.use_flash_attn:
+            q, k, v = [rearrange(x, 's b ... -> b s ...').contiguous()
+                       for x in (query_layer, key_layer, value_layer)]
+            with mpu.get_cuda_rng_tracker().fork():
+                context_layer = self.core_attention_flash(q, k, v)
+            context_layer = rearrange(context_layer, 'b s h d -> s b (h d)').contiguous()
         else:
-            if not hasattr(self, "logged_alibi"):
-                logger.debug("Using Alibi.")
-                self.logged_alibi = True
-
-            if self.apply_query_key_layer_scaling:
-                beta = 1.0 / self.layer_number
+            if alibi is None:
+                # preallocting result tensor: [b * np, sq, sk]
+                matmul_result = torch.empty(
+                    output_size[0]*output_size[1],
+                    output_size[2],
+                    output_size[3],
+                    dtype=query_layer.dtype,
+                    device=torch.cuda.current_device())
+        
+                # Raw attention scores. [b * np, sq, sk]
+                matmul_result = torch.baddbmm(
+                    matmul_result,
+                    query_layer.transpose(0, 1),   # [b * np, sq, hn]
+                    key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
+                    beta=0.0, alpha=(1.0/self.norm_factor))
             else:
-                beta = 1.0
+                if not hasattr(self, "logged_alibi"):
+                    logger.debug("Using Alibi.")
+                    self.logged_alibi = True
 
-            matmul_result = torch.baddbmm(
-                matmul_result,
-                query_layer.transpose(0, 1),  # [b * np, sq, hn]
-                key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
-                beta=beta, alpha=(1.0 / self.norm_factor))
-
-        # change view to [b, np, sq, sk]
-        attention_scores = matmul_result.view(*output_size)
-        # ==================================================
-        # Update attention mask for inference. [b, np, sq, sk]
-        # ==================================================
-
-        if get_key_value:
-            with torch.no_grad():
-                # TODO @thomasw21 Handle case where `attention_mask` is None
-                if layer_past is not None:
-                    attention_mask = attention_mask[
-                        ...,
-                        attention_scores.size(3) - 1,
-                        :attention_scores.size(3)].unsqueeze(2)
+                if self.apply_query_key_layer_scaling:
+                    beta = 1.0 / self.layer_number
                 else:
-                    attention_mask = attention_mask[
-                        ...,
-                        :attention_scores.size(3),
-                        :attention_scores.size(3)]
+                    beta = 1.0
 
-        # ===========================
-        # Attention probs and dropout
-        # ===========================
+                # preallocting result tensor: [b * np, sq, sk]
+                matmul_result = alibi[:output_size[0]*output_size[1], :, :output_size[3]]
 
-        # attention scores and attention mask [b, np, sq, sk]
-        attention_probs = self.scale_mask_softmax(attention_scores,
-                                                  attention_mask)
+                # Raw attention scores. [b * np, sq, sk]
+                matmul_result = torch.baddbmm(
+                    matmul_result,
+                    query_layer.transpose(0, 1),  # [b * np, sq, hn]
+                    key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
+                    beta=beta, alpha=(1.0 / self.norm_factor))
 
-        # This is actually dropping out entire tokens to attend to, which might
-        # seem a bit unusual, but is taken from the original Transformer paper.
-        with mpu.get_cuda_rng_tracker().fork():
-            attention_probs = self.attention_dropout(attention_probs)
+            # change view to [b, np, sq, sk]
+            attention_scores = matmul_result.view(*output_size)
+            # ==================================================
+            # Update attention mask for inference. [b, np, sq, sk]
+            # ==================================================
 
-        # =========================
-        # Context layer. [sq, b, hp]
-        # =========================
+            if get_key_value:
+                with torch.no_grad():
+                    # TODO @thomasw21 Handle case where `attention_mask` is None
+                    if layer_past is not None:
+                        attention_mask = attention_mask[
+                            ...,
+                            attention_scores.size(3) - 1,
+                            :attention_scores.size(3)].unsqueeze(2)
+                    else:
+                        attention_mask = attention_mask[
+                            ...,
+                            :attention_scores.size(3),
+                            :attention_scores.size(3)]
 
-        # value_layer -> context layer.
-        # [sk, b, np, hn] --> [b, np, sq, hn]
+            # ===========================
+            # Attention probs and dropout
+            # ===========================
 
-        # context layer shape: [b, np, sq, hn]
-        output_size = (value_layer.size(1),
-                       value_layer.size(2),
-                       query_layer.size(0),
-                       value_layer.size(3))
+            # attention scores and attention mask [b, np, sq, sk]
+            attention_probs = self.scale_mask_softmax(attention_scores,
+                                                    attention_mask)
 
-        # change view [sk, b * np, hn]
-        value_layer = value_layer.view(value_layer.size(0),
-                                       output_size[0] * output_size[1], -1)
+            # This is actually dropping out entire tokens to attend to, which might
+            # seem a bit unusual, but is taken from the original Transformer paper.
+            with mpu.get_cuda_rng_tracker().fork():
+                attention_probs = self.attention_dropout(attention_probs)
 
-        # change view [b * np, sq, sk]
-        attention_probs = attention_probs.view(output_size[0] * output_size[1],
-                                               output_size[2], -1)
+            # =========================
+            # Context layer. [sq, b, hp]
+            # =========================
 
-        # matmul: [b * np, sq, hn]
-        context_layer = torch.bmm(attention_probs, value_layer.transpose(0, 1))
+            # value_layer -> context layer.
+            # [sk, b, np, hn] --> [b, np, sq, hn]
 
-        # change view [b, np, sq, hn]
-        context_layer = context_layer.view(*output_size)
+            # context layer shape: [b, np, sq, hn]
+            output_size = (value_layer.size(1),
+                        value_layer.size(2),
+                        query_layer.size(0),
+                        value_layer.size(3))
 
-        # [b, np, sq, hn] --> [sq, b, np, hn]
-        context_layer = context_layer.permute(2, 0, 1, 3).contiguous()
+            # change view [sk, b * np, hn]
+            value_layer = value_layer.view(value_layer.size(0),
+                                        output_size[0] * output_size[1], -1)
 
-        # [sq, b, np, hn] --> [sq, b, hp]
-        new_context_layer_shape = context_layer.size()[:-2] + \
-            (self.hidden_size_per_partition,)
-        context_layer = context_layer.view(*new_context_layer_shape)
+            # change view [b * np, sq, sk]
+            attention_probs = attention_probs.view(output_size[0] * output_size[1],
+                                                output_size[2], -1)
+
+            # matmul: [b * np, sq, hn]
+            context_layer = torch.bmm(attention_probs, value_layer.transpose(0, 1))
+
+            # change view [b, np, sq, hn]
+            context_layer = context_layer.view(*output_size)
+
+            # [b, np, sq, hn] --> [sq, b, np, hn]
+            context_layer = context_layer.permute(2, 0, 1, 3).contiguous()
+
+            # [sq, b, np, hn] --> [sq, b, hp]
+            new_context_layer_shape = context_layer.size()[:-2] + \
+                (self.hidden_size_per_partition,)
+            context_layer = context_layer.view(*new_context_layer_shape)
 
         # =================
         # Output. [sq, b, h]
