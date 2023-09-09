@@ -35,8 +35,7 @@ class RMSNorm(torch.nn.Module):
     def forward(self, x):
         if self.norm_tp_auto_sync:
             torch.distributed.all_reduce(self.weight, op=torch.distributed.ReduceOp.AVG, group=mpu.get_tensor_model_parallel_group())
-            if self.use_bias is not None:
-                torch.distributed.all_reduce(self.bias, op=torch.distributed.ReduceOp.AVG, group=mpu.get_tensor_model_parallel_group())
+            torch.distributed.all_reduce(self.bias, op=torch.distributed.ReduceOp.AVG, group=mpu.get_tensor_model_parallel_group())
 
         # fp32로 학습하는 경우
         # fp16으로 학습하는 경우 (mixed_precision_training)
