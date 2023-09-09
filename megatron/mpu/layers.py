@@ -36,7 +36,7 @@ from .random import get_cuda_rng_tracker
 from .utils import divide
 from .utils import split_tensor_along_last_dim
 from .utils import VocabUtility
-from ..model.fused_layer_norm import MixedFusedLayerNorm as LayerNorm
+from ..model.normalizations import NORMALIZATIONS
 from megatron import get_args, mpu
 import deepspeed.runtime.activation_checkpointing.checkpointing as ds_checkpointing
 
@@ -191,8 +191,8 @@ class VocabParallelEmbedding(torch.nn.Module):
 
         # only the first stage embedding runs this class' forward. The head's embedding does its own
         # thing, so don't waste memory allocating LN weights.
-        if mpu.is_pipeline_first_stage() and (args.use_bnb_optimizer or args.embed_layernorm):
-            self.norm = LayerNorm(embedding_dim)
+        if mpu.is_pipeline_first_stage() and (args.use_bnb_optimizer or args.embed_norm):
+            self.norm = NORMALIZATIONS[args.normalization](embedding_dim, eps=args.norm_epsilon)
 
         if args.use_bnb_optimizer:
             # for BNB we ignore the passed init_method and use torch.nn.init.xavier_uniform_

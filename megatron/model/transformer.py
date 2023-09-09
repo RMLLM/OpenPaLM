@@ -23,13 +23,13 @@ from megatron import get_args, logging
 from megatron import mpu
 from .module import MegatronModule
 from megatron.enums import AttnMaskType, LayerType, AttnType, PositionEmbeddingType
-from megatron.model.fused_layer_norm import MixedFusedLayerNorm as LayerNorm
 from megatron.model.fused_softmax import FusedScaleMaskSoftmax
 from megatron.model.fused_bias_gelu import bias_gelu_impl
 from megatron.model.utils import attention_mask_func, openai_gelu, erf_gelu
 
 import deepspeed
 
+from .normalizations import NORMALIZATIONS
 from .glu_activations import GLU_ACTIVATIONS
 from .positional_embeddings import RotaryEmbedding, apply_rotary_pos_emb_torch, apply_rotary_pos_emb
 
@@ -446,16 +446,16 @@ class ParallelTransformerLayer(MegatronModule):
         self.layer_number = layer_number
         self.layer_type = layer_type
 
-        self.apply_residual_connection_post_layernorm \
-            = args.apply_residual_connection_post_layernorm
+        self.apply_residual_connection_post_norm \
+            = args.apply_residual_connection_post_norm
 
         self.bf16 = args.bf16
         self.fp32_residual_connection = args.fp32_residual_connection
 
-        # Layernorm on the input data.
-        self.input_layernorm = LayerNorm(
+        # layernorm or rmsnorm on the input data.
+        self.input_norm = NORMALIZATIONS[args.normalization](
             args.hidden_size,
-            eps=args.layernorm_epsilon)
+            eps=args.norm_epsilon)
 
         # Self attention.
         self.self_attention = ParallelAttention(
@@ -468,9 +468,9 @@ class ParallelTransformerLayer(MegatronModule):
         self.bias_dropout_fusion = args.bias_dropout_fusion
 
         # Layernorm on the attention output
-        self.post_attention_layernorm = LayerNorm(
+        self.post_attention_norm = NORMALIZATIONS[args.normalization](
             args.hidden_size,
-            eps=args.layernorm_epsilon)
+            eps=args.norm_epsilon)
 
         if self.layer_type == LayerType.decoder:
             self.inter_attention = ParallelAttention(
@@ -479,9 +479,9 @@ class ParallelTransformerLayer(MegatronModule):
                 layer_number,
                 attention_type=AttnType.cross_attn)
             # Layernorm on the attention output.
-            self.post_inter_attention_layernorm = LayerNorm(
+            self.post_inter_attention_norm = NORMALIZATIONS[args.normalization](
                 args.hidden_size,
-                eps=args.layernorm_epsilon)
+                eps=args.norm_epsilon)
 
         # MLP
         self.mlp = ParallelMLP(init_method,
@@ -502,11 +502,11 @@ class ParallelTransformerLayer(MegatronModule):
                 layer_past=None, get_key_value=False):
         # hidden_states: [b, s, h]
 
-        # Layer norm at the beginning of the transformer layer.
-        layernorm_output = self.input_layernorm(hidden_states)
+        # layernorm or rmsnorm at the beginning of the transformer layer.
+        norm_output = self.input_norm(hidden_states)
         # Self attention.
         attention_output, attention_bias = \
-            self.self_attention(layernorm_output,
+            self.self_attention(norm_output,
                                 attention_mask,
                                 layer_past=layer_past,
                                 get_key_value=get_key_value,
@@ -516,8 +516,8 @@ class ParallelTransformerLayer(MegatronModule):
             attention_output, presents = attention_output
 
         # Residual connection.
-        if self.apply_residual_connection_post_layernorm:
-            residual = layernorm_output
+        if self.apply_residual_connection_post_norm:
+            residual = norm_output
         else:
             residual = hidden_states
 
@@ -535,45 +535,45 @@ class ParallelTransformerLayer(MegatronModule):
 
         # re-enable torch grad to enable fused optimization.
         with torch.enable_grad():
-            layernorm_input = bias_dropout_add_func(
+            norm_input = bias_dropout_add_func(
                 attention_output,
                 attention_bias.expand_as(residual),
                 residual,
                 self.hidden_dropout)
 
         # Layer norm post the self attention.
-        layernorm_output = self.post_attention_layernorm(layernorm_input)
+        norm_output = self.post_attention_norm(norm_input)
 
         if self.layer_type == LayerType.decoder:
             attention_output, attention_bias = \
-                self.inter_attention(layernorm_output,
+                self.inter_attention(norm_output,
                                      enc_dec_attn_mask,
                                      encoder_output=encoder_output)
             # residual connection
-            if self.apply_residual_connection_post_layernorm:
-                residual = layernorm_output
+            if self.apply_residual_connection_post_norm:
+                residual = norm_output
             else:
-                residual = layernorm_input
+                residual = norm_input
 
             # re-enable torch grad to enable fused optimization.
             with torch.enable_grad():
-                layernorm_input = bias_dropout_add_func(
+                norm_input = bias_dropout_add_func(
                     attention_output,
                     attention_bias.expand_as(residual),
                     residual,
                     self.hidden_dropout)
 
             # Layer norm post the decoder attention
-            layernorm_output = self.post_inter_attention_layernorm(layernorm_input)
+            norm_output = self.post_inter_attention_norm(norm_input)
 
         # MLP.
-        mlp_output, mlp_bias = self.mlp(layernorm_output)
+        mlp_output, mlp_bias = self.mlp(norm_output)
 
         # Second residual connection.
-        if self.apply_residual_connection_post_layernorm:
-            residual = layernorm_output
+        if self.apply_residual_connection_post_norm:
+            residual = norm_output
         else:
-            residual = layernorm_input
+            residual = norm_input
 
         # re-enable torch grad to enable fused optimization.
         with torch.enable_grad():
@@ -707,10 +707,10 @@ class ParallelTransformer(MegatronModule):
             [build_layer(i + 1 + offset) for i in range(self.num_layers)])
 
         if self.post_process:
-            # Final layer norm before output.
-            self.final_layernorm = LayerNorm(
+            # Final layernorm or rmsrnorm before output.
+            self.final_norm = NORMALIZATIONS[args.normalization](
                 args.hidden_size,
-                eps=args.layernorm_epsilon)
+                eps=args.norm_epsilon)
 
         if deepspeed.checkpointing.is_configured():
             global get_cuda_rng_tracker, checkpoint
@@ -811,7 +811,7 @@ class ParallelTransformer(MegatronModule):
         if self.post_process:
             # Reverting data format change [s b h] --> [b s h].
             hidden_states = hidden_states.transpose(0, 1).contiguous()
-            output = self.final_layernorm(hidden_states)
+            output = self.final_norm(hidden_states)
         else:
             output = hidden_states
         if get_key_value:

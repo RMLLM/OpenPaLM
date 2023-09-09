@@ -27,9 +27,9 @@ from .language_model import parallel_lm_logits
 from .language_model import get_language_model
 from .utils import init_method_normal
 from .utils import scaled_init_method_normal
+from .normalizations import NORMALIZATIONS
 
 from deepspeed.pipe import PipelineModule, LayerSpec, TiedLayerSpec
-from megatron.model.fused_layer_norm import MixedFusedLayerNorm as LayerNorm
 from megatron.model.module import float16_to_fp32
 from .language_model import EmbeddingPipe
 from .transformer import ParallelTransformerLayerPipe
@@ -261,11 +261,11 @@ class GPTModelPipe(PipelineModule,MegatronModule):
             return x.transpose(0, 1).contiguous()
         self.specs.append(undo)
 
-        # Final layernorm after transformer layers
+        # Final layernorm or rmsrnorm after transformer layers
         self.specs.append(
-            LayerSpec(LayerNorm,
+            LayerSpec(NORMALIZATIONS[args.normalization],
                       args.hidden_size,
-                      eps=args.layernorm_epsilon))
+                      eps=args.norm_epsilon))
 
         def _logits_helper(embedding, lm_output):
             """A wrapper to massage inputs/outputs from pipeline. """

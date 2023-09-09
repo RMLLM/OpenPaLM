@@ -373,18 +373,21 @@ def _add_network_size_args(parser):
                        help='Pad the vocab size to this value.'
                        'This value must be greater than the initial size of the tokenizer'
                        ', needs to be divisible by TP size and `make-vocab-size-divisible-by`.')
-    group.add_argument('--layernorm-epsilon', type=float, default=1e-5,
-                       help='Layer norm epsilon.')
+    group.add_argument('--normalization', default='layernorm',
+                       choices=['layernorm', 'rmsnorm'],
+                       help='Which normalization technique to use.')
+    group.add_argument('--norm-epsilon', type=float, default=1e-5,
+                       help='Epsilon for layernorm and rmsnorm.')
+    group.add_argument('--embed-norm', action='store_true',
+                       help='use layernorm or rmsnorm for embedding')
     group.add_argument('--sync-tp-duplicated-parameters', action='store_true',
                        help='Force syncing duplicated params across TP ranks in forward. '
                        'This is a workaround for an unresolved bug leading to TP ranks '
                        'getting out of sync with each other.')
-    group.add_argument('--apply-residual-connection-post-layernorm',
+    group.add_argument('--apply-residual-connection-post-norm',
                        action='store_true',
                        help='If set, use original BERT residula connection '
                        'ordering.')
-    group.add_argument('--embed-layernorm', action='store_true',
-                       help='use layernorm for embedding')
     group.add_argument('--openai-gelu', action='store_true',
                        help='Use OpenAIs GeLU implementation. This option'
                        'should not be used unless for backward compatibility'
