@@ -707,7 +707,7 @@ class ParallelTransformer(MegatronModule):
             [build_layer(i + 1 + offset) for i in range(self.num_layers)])
 
         if self.post_process:
-            # Final layernorm or rmsrnorm before output.
+            # Final layernorm or rmsnorm before output.
             self.final_norm = NORMALIZATIONS[args.normalization](
                 args.hidden_size,
                 eps=args.norm_epsilon)
