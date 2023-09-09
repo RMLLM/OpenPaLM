@@ -261,7 +261,7 @@ class GPTModelPipe(PipelineModule,MegatronModule):
             return x.transpose(0, 1).contiguous()
         self.specs.append(undo)
 
-        # Final layernorm or rmsrnorm after transformer layers
+        # Final layernorm or rmsnorm after transformer layers
         self.specs.append(
             LayerSpec(NORMALIZATIONS[args.normalization],
                       args.hidden_size,
