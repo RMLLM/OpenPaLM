@@ -383,8 +383,8 @@ def _add_network_size_args(parser):
                        action='store_true',
                        help='If set, use original BERT residula connection '
                        'ordering.')
-    group.add_argument('--embed-layernorm', action='store_true',
-                       help='use layernorm for embedding')
+    # group.add_argument('--embed-layernorm', action='store_true',
+    #                    help='use layernorm for embedding')
     group.add_argument('--openai-gelu', action='store_true',
                        help='Use OpenAIs GeLU implementation. This option'
                        'should not be used unless for backward compatibility'
@@ -395,21 +395,23 @@ def _add_network_size_args(parser):
     group.add_argument('--bert-no-binary-head', action='store_false',
                        help='Disable BERT binary head.',
                        dest='bert_binary_head')
+    # group.add_argument('--position-embedding-type', type=lambda x: PositionEmbeddingType[x],
+    #                    choices=list(PositionEmbeddingType),
+    #                    default=PositionEmbeddingType.absolute,
+    #                    help='Define position embedding type ("absolute" | "rotary" | "alibi"). "absolute" by default.'
+    #                    )
     group.add_argument('--position-embedding-type', type=lambda x: PositionEmbeddingType[x],
                        choices=list(PositionEmbeddingType),
                        default=PositionEmbeddingType.absolute,
-                       help='Define position embedding type ("absolute" | "rotary" | "alibi"). "absolute" by default.'
+                       help='Define position embedding type ("absolute" | "rotary"). "absolute" by default.'
                        )
     group.add_argument('--glu-activation', type=str,
                        choices=megatron.model.glu_activations.GLU_ACTIVATIONS.keys(),
                        help='GLU activations to use.'
                        )
-
     group.add_argument('--kill-switch-path', type=str,
                        help='path to look for a kill switch, which if found will automatically exit the program'
                        )
-
-
     group.add_argument('--log-level', type=str, choices=list(log_levels.keys()),
                        help="Logger log level to use on the main process. Possible choices are the log levels as strings: 'debug', "
                        "'info', 'warning', 'error' and 'critical', plus a 'passive' level which doesn't set anything and lets the "
