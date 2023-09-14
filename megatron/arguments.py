@@ -254,7 +254,8 @@ def parse_args(extra_args_provider=None, defaults={},
         assert args.encoder_seq_length is not None
         args.seq_length = args.encoder_seq_length
 
-    if args.position_embedding_type == PositionEmbeddingType.absolute or args.position_embedding_type == PositionEmbeddingType.alibi:
+    # if args.position_embedding_type == PositionEmbeddingType.absolute or args.position_embedding_type == PositionEmbeddingType.alibi:
+    if args.position_embedding_type == PositionEmbeddingType.absolute:
         assert args.max_position_embeddings is not None
         if args.seq_length is not None:
             assert args.max_position_embeddings >= args.seq_length

@@ -245,8 +245,8 @@ class VocabParallelEmbedding(torch.nn.Module):
         # Reduce across all the model parallel GPUs.
         output = reduce_from_tensor_model_parallel_region(output_parallel)
 
-        if hasattr(self, 'norm'):
-            output = self.norm(output)
+        # if hasattr(self, 'norm'):
+        #     output = self.norm(output)
 
         return output
 
