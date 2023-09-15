@@ -577,7 +577,7 @@ def _add_training_args(parser):
                        help='Disable bias and gelu fusion.',
                        dest='gelu_fusion')
     group.add_argument('--no-dropout-fusion', action='store_false',
-                       help='Disable bias and dropout fusion.',
+                       help='Disable dropout fusion.',
                        dest='dropout_fusion')
     group.add_argument('--optimizer', type=str, default='adam',
                        choices=['adam', 'sgd'],
