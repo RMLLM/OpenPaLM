@@ -282,9 +282,27 @@ def parse_args(extra_args_provider=None, defaults={},
 
     args.curriculum_learning = False
 
-    # Activation function
-    if args.glu_activation is not None and args.bias_gelu_fusion:
-        raise ValueError("if glu-activation is used, please set --no-bias-gelu-fusion")
+    if args.add_bias_linear:
+        # Activation function
+        if args.glu_activation is not None and args.bias_gelu_fusion:
+            raise ValueError("if glu-activation is used, please set --no-bias-gelu-fusion")
+        if args.gelu_fusion:
+            if args.rank == 0:
+                print(f"args.gelu_fusion is set to False due to args.add_bias_linear is {args.add_bias_linear}")
+            args.gelu_fusion = False
+        if args.dropout_fusion:
+            if args.rank == 0:
+                print(f"args.dropout_fusion is set to False due to args.add_bias_linear is {args.add_bias_linear}")
+            args.dropout_fusion = False
+    else:
+        if args.bias_gelu_fusion:
+            if args.rank == 0:
+                print(f"args.bias_gelu_fusion is set to False due to args.add_bias_linear is {args.add_bias_linear}")
+            args.bias_gelu_fusion = False
+        if args.bias_dropout_fusion:
+            if args.rank == 0:
+                print(f"args.bias_dropout_fusion is set to False due to args.add_bias_linear is {args.add_bias_linear}")
+            args.bias_dropout_fusion = False
 
     # Skip train iterations
     if args.skip_train_iteration_range is not None:
@@ -384,6 +402,9 @@ def _add_network_size_args(parser):
                        action='store_true',
                        help='If set, use original BERT residula connection '
                        'ordering.')
+    group.add_argument('--disable-bias-linear', action='store_false',
+                       help='Disable bias in the linear layers',
+                       dest='add_bias_linear')
     # group.add_argument('--embed-layernorm', action='store_true',
     #                    help='use layernorm for embedding')
     group.add_argument('--openai-gelu', action='store_true',
@@ -552,6 +573,12 @@ def _add_training_args(parser):
     group.add_argument('--no-bias-dropout-fusion', action='store_false',
                        help='Disable bias and dropout fusion.',
                        dest='bias_dropout_fusion')
+    group.add_argument('--no-gelu-fusion', action='store_false',
+                       help='Disable bias and gelu fusion.',
+                       dest='gelu_fusion')
+    group.add_argument('--no-dropout-fusion', action='store_false',
+                       help='Disable bias and dropout fusion.',
+                       dest='dropout_fusion')
     group.add_argument('--optimizer', type=str, default='adam',
                        choices=['adam', 'sgd'],
                        help='Optimizer function')

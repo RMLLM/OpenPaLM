@@ -26,6 +26,7 @@ from megatron.enums import AttnMaskType, LayerType, AttnType, PositionEmbeddingT
 from megatron.model.fused_layer_norm import MixedFusedLayerNorm as LayerNorm
 from megatron.model.fused_softmax import FusedScaleMaskSoftmax
 from megatron.model.fused_bias_gelu import bias_gelu_impl
+from megatron.model.fused_gelu import gelu_impl
 from megatron.model.utils import attention_mask_func, openai_gelu, erf_gelu
 
 import deepspeed
@@ -74,11 +75,14 @@ class ParallelMLP(MegatronModule):
             args.hidden_size,
             # GLU is a special activation that divides the dimension by a factor 2.
             2 * args.ffn_hidden_size if args.glu_activation else args.ffn_hidden_size,
+            bias=args.add_bias_linear,
             gather_output=False,
             init_method=init_method,
             skip_bias_add=True)
 
         self.bias_gelu_fusion = args.bias_gelu_fusion
+        self.gelu_fusion = args.gelu_fusion
+
         self.activation_func = F.gelu
         if args.glu_activation:
             self.activation_func = GLU_ACTIVATIONS[args.glu_activation]
@@ -91,22 +95,25 @@ class ParallelMLP(MegatronModule):
         self.dense_4h_to_h = mpu.RowParallelLinear(
             args.ffn_hidden_size,
             args.hidden_size,
+            bias=args.add_bias_linear,
             input_is_parallel=True,
             init_method=output_layer_init_method,
             skip_bias_add=True)
 
-
     def forward(self, hidden_states):
-
         # [s, b, 4hp]
         intermediate_parallel, bias_parallel = self.dense_h_to_4h(hidden_states)
 
-        if self.bias_gelu_fusion:
-             intermediate_parallel = \
-                     bias_gelu_impl(intermediate_parallel, bias_parallel)
+        if bias_parallel is not None:
+            if self.bias_gelu_fusion:
+                intermediate_parallel = bias_gelu_impl(intermediate_parallel, bias_parallel)
+            else:
+                intermediate_parallel = self.activation_func(intermediate_parallel + bias_parallel)
         else:
-            intermediate_parallel = \
-                self.activation_func(intermediate_parallel + bias_parallel)
+            if self.gelu_fusion:
+                intermediate_parallel = gelu_impl(intermediate_parallel)
+            else:
+                intermediate_parallel = self.activation_func(intermediate_parallel)
 
         # [s, b, h]
         output, output_bias = self.dense_4h_to_h(intermediate_parallel)
@@ -154,9 +161,12 @@ class ParallelAttention(MegatronModule):
             self.query_key_value = mpu.ColumnParallelLinear(
                 args.hidden_size,
                 3 * projection_size,
+                bias=args.add_bias_linear,
                 gather_output=False,
-                init_method=init_method)
+                init_method=init_method,
+                skip_bias_add=False)
         else:
+            # NOTE: Below code block is not used.
             assert attention_type == AttnType.cross_attn
             self.query = mpu.ColumnParallelLinear(
                 args.hidden_size,
@@ -193,6 +203,7 @@ class ParallelAttention(MegatronModule):
         self.dense = mpu.RowParallelLinear(
             projection_size,
             args.hidden_size,
+            bias=args.add_bias_linear,
             input_is_parallel=True,
             init_method=output_layer_init_method,
             skip_bias_add=True)
@@ -230,6 +241,7 @@ class ParallelAttention(MegatronModule):
              key_layer,
              value_layer) = mpu.split_tensor_along_last_dim(mixed_x_layer, 3)
         else:
+            # NOTE: Below code block is not used.
             # Attention heads [sk, b, h] --> [sk, b, (np * 2 * hn)]
             mixed_kv_layer, _ = self.key_value(encoder_output)
 
@@ -363,8 +375,7 @@ class ParallelAttention(MegatronModule):
         # ===========================
 
         # attention scores and attention mask [b, np, sq, sk]
-        attention_probs = self.scale_mask_softmax(attention_scores,
-                                                  attention_mask)
+        attention_probs = self.scale_mask_softmax(attention_scores, attention_mask)
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
@@ -443,6 +454,30 @@ def bias_dropout_add_fused_inference(x, bias, residual, prob):
     return bias_dropout_add(x, bias, residual, prob, False)
 
 
+def dropout_add(x, tensor, prob, training):
+    # type: (Tensor, Tensor, float, bool) -> Tensor
+    out = torch.nn.functional.dropout(x + tensor, p=prob, training=training)
+    return out
+
+
+def get_dropout_add(training):
+    def _dropout_add(x, tensor, prob):
+        return dropout_add(x, tensor, prob, training)
+    return _dropout_add
+
+
+@torch.jit.script
+def dropout_add_fused_train(x, tensor, prob: float):
+    # type: (Tensor, Tensor, float) -> Tensor
+    return dropout_add(x, tensor, prob, True)
+
+
+@torch.jit.script
+def dropout_add_fused_inference(x, tensor, prob: float):
+    # type: (Tensor, Tensor, float) -> Tensor
+    return dropout_add(x, tensor, prob, False)
+
+
 class ParallelTransformerLayer(MegatronModule):
     """A single transformer layer.
 
@@ -454,6 +489,7 @@ class ParallelTransformerLayer(MegatronModule):
                  layer_number, layer_type=LayerType.encoder,
                  self_attn_mask_type=AttnMaskType.padding):
         args = get_args()
+        self.use_bias = args.add_bias_linear
 
         super(ParallelTransformerLayer, self).__init__()
         self.layer_number = layer_number
@@ -479,6 +515,7 @@ class ParallelTransformerLayer(MegatronModule):
             attn_mask_type=self_attn_mask_type)
         self.hidden_dropout = args.hidden_dropout
         self.bias_dropout_fusion = args.bias_dropout_fusion
+        self.dropout_fusion = args.dropout_fusion
 
         # Layernorm on the attention output
         self.post_attention_layernorm = LayerNorm(
@@ -543,25 +580,42 @@ class ParallelTransformerLayer(MegatronModule):
         # trigerring the fusion kernel. For now, we use two
         # different nn.functional routines to account for varying
         # dropout semantics during training and inference phases.
-        if self.bias_dropout_fusion:
-            if self.training:
-                bias_dropout_add_func = bias_dropout_add_fused_train
+        if self.use_bias:
+            if self.bias_dropout_fusion:
+                if self.training:
+                    bias_dropout_add_func = bias_dropout_add_fused_train
+                else:
+                    bias_dropout_add_func = bias_dropout_add_fused_inference
             else:
-                bias_dropout_add_func = bias_dropout_add_fused_inference
+                bias_dropout_add_func = get_bias_dropout_add(self.training)
         else:
-            bias_dropout_add_func = get_bias_dropout_add(self.training)
+            if self.dropout_fusion:
+                if self.training:
+                    bias_dropout_add_func = dropout_add_fused_train
+                else:
+                    bias_dropout_add_func = dropout_add_fused_inference
+            else:
+                dropout_add_func = get_dropout_add(self.training)
 
         # re-enable torch grad to enable fused optimization.
         with torch.enable_grad():
-            layernorm_input = bias_dropout_add_func(
-                attention_output,
-                attention_bias.expand_as(residual),
-                residual,
-                self.hidden_dropout)
+            if attention_bias is not None:
+                layernorm_input = bias_dropout_add_func(
+                    attention_output,
+                    attention_bias.expand_as(residual),
+                    residual,
+                    self.hidden_dropout)
+            else:
+                with torch.enable_grad():
+                    layernorm_input = dropout_add_func(
+                        attention_output,
+                        residual,
+                        self.hidden_dropout)
 
         # Layer norm post the self attention.
         layernorm_output = self.post_attention_layernorm(layernorm_input)
 
+        # NOTE: Below code block is not used.
         if self.layer_type == LayerType.decoder:
             attention_output, attention_bias = \
                 self.inter_attention(layernorm_output,
@@ -595,11 +649,18 @@ class ParallelTransformerLayer(MegatronModule):
 
         # re-enable torch grad to enable fused optimization.
         with torch.enable_grad():
-            output = bias_dropout_add_func(
-                mlp_output,
-                mlp_bias.expand_as(residual),
-                residual,
-                self.hidden_dropout)
+            if mlp_bias is not None:
+                output = bias_dropout_add_func(
+                    mlp_output,
+                    mlp_bias.expand_as(residual),
+                    residual,
+                    self.hidden_dropout)
+            else:
+                output = dropout_add_func(
+                    mlp_output,
+                    residual,
+                    self.hidden_dropout
+                )
 
         if get_key_value:
             output = [output, presents]
