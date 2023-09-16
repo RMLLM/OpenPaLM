@@ -191,8 +191,8 @@ class VocabParallelEmbedding(torch.nn.Module):
 
         # only the first stage embedding runs this class' forward. The head's embedding does its own
         # thing, so don't waste memory allocating LN weights.
-        if mpu.is_pipeline_first_stage() and (args.use_bnb_optimizer or args.embed_layernorm):
-            self.norm = LayerNorm(embedding_dim)
+        # if mpu.is_pipeline_first_stage() and (args.use_bnb_optimizer or args.embed_layernorm):
+        #     self.norm = LayerNorm(embedding_dim)
 
         if args.use_bnb_optimizer:
             # for BNB we ignore the passed init_method and use torch.nn.init.xavier_uniform_
@@ -245,8 +245,8 @@ class VocabParallelEmbedding(torch.nn.Module):
         # Reduce across all the model parallel GPUs.
         output = reduce_from_tensor_model_parallel_region(output_parallel)
 
-        if hasattr(self, 'norm'):
-            output = self.norm(output)
+        # if hasattr(self, 'norm'):
+        #     output = self.norm(output)
 
         return output
 
