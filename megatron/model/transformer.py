@@ -302,24 +302,26 @@ class ParallelAttention(MegatronModule):
                 causal=True, attention_dropout=args.attention_dropout
             )
 
-        coeff = None
-        self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
-        if self.apply_query_key_layer_scaling:
-            coeff = self.layer_number
-            self.norm_factor *= coeff
+        else:
+            # The following features are applicable only when flash attention is disabled.
+            coeff = None
+            self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
+            if self.apply_query_key_layer_scaling:
+                coeff = self.layer_number
+                self.norm_factor *= coeff
 
-        self.scale_mask_softmax = FusedScaleMaskSoftmax(
-            self.fp16, self.bf16,
-            self.attn_mask_type,
-            args.masked_softmax_fusion,
-            attention_mask_func,
-            self.attention_softmax_in_fp32,
-            coeff)
+            self.scale_mask_softmax = FusedScaleMaskSoftmax(
+                self.fp16, self.bf16,
+                self.attn_mask_type,
+                args.masked_softmax_fusion,
+                attention_mask_func,
+                self.attention_softmax_in_fp32,
+                coeff)
 
-        # Dropout. Note that for a single iteration, this layer will generate
-        # different outputs on different number of parallel partitions but
-        # on average it should not be partition dependent.
-        self.attention_dropout = torch.nn.Dropout(args.attention_dropout)
+            # Dropout. Note that for a single iteration, this layer will generate
+            # different outputs on different number of parallel partitions but
+            # on average it should not be partition dependent.
+            self.attention_dropout = torch.nn.Dropout(args.attention_dropout)
 
         # Output.
         self.dense = mpu.RowParallelLinear(
