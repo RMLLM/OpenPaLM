@@ -606,11 +606,10 @@ class ParallelTransformerLayer(MegatronModule):
                     residual,
                     self.hidden_dropout)
             else:
-                with torch.enable_grad():
-                    layernorm_input = dropout_add_func(
-                        attention_output,
-                        residual,
-                        self.hidden_dropout)
+                layernorm_input = dropout_add_func(
+                    attention_output,
+                    residual,
+                    self.hidden_dropout)
 
         # Layer norm post the self attention.
         layernorm_output = self.post_attention_layernorm(layernorm_input)
