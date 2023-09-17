@@ -503,10 +503,9 @@ class ParallelTransformerLayer(MegatronModule):
 
         self.bf16 = args.bf16
         self.fp32_residual_connection = args.fp32_residual_connection
-        # gpt-j arguments
-        self.gpt_j_residual = args.gpt_j_residual
-        self.gpt_j_tied = args.gpt_j_tied
-        if self.gpt_j_residual:
+        # parallel-layer arg
+        self.use_parallel_residual = args.use_parallel_residual
+        if self.use_parallel_residual:
             self.reduce = mpu.mappings.reduce_from_tensor_model_parallel_region
 
         # Layernorm on the input data.
@@ -521,14 +520,14 @@ class ParallelTransformerLayer(MegatronModule):
             layer_number,
             attention_type=AttnType.self_attn,
             attn_mask_type=self_attn_mask_type,
-            parallel_output=self.gpt_j_residual)
+            parallel_output=self.use_parallel_residual)
         self.hidden_dropout = args.hidden_dropout
         self.bias_dropout_fusion = args.bias_dropout_fusion
         self.dropout_fusion = args.dropout_fusion
 
         # Layernorm on the attention output
-        # only if gpt_j_tied is not applied
-        if not self.gpt_j_tied:
+        # if parallel-layer is not applied
+        if not self.use_parallel_residual:
             self.post_attention_layernorm = LayerNorm(
                 args.hidden_size,
                 eps=args.layernorm_epsilon)
@@ -539,7 +538,7 @@ class ParallelTransformerLayer(MegatronModule):
                 output_layer_init_method,
                 layer_number,
                 attention_type=AttnType.cross_attn,
-                parallel_output=self.gpt_j_residual)
+                parallel_output=self.use_parallel_residual)
             # Layernorm on the attention output.
             self.post_inter_attention_layernorm = LayerNorm(
                 args.hidden_size,
@@ -548,7 +547,7 @@ class ParallelTransformerLayer(MegatronModule):
         # MLP
         self.mlp = ParallelMLP(init_method,
                                output_layer_init_method,
-                               parallel_output=self.gpt_j_residual)
+                               parallel_output=self.use_parallel_residual)
 
         # Alibi
         # if args.position_embedding_type == PositionEmbeddingType.alibi:
@@ -585,9 +584,9 @@ class ParallelTransformerLayer(MegatronModule):
                 dropout_add_func = get_dropout_add(self.training)
 
         # hidden_states: [b, s, h]
-        # apply PaLM (gpt-j) style parallel layers
+        # apply PaLM (gpt-j) style parallel-layers
         # ref: https://github.com/EleutherAI/gpt-neox/blob/c883e8c6a2ff6a60b07f0f8006ce0208f41317f3/megatron/model/transformer.py#L804-L847
-        if self.gpt_j_residual:
+        if self.use_parallel_residual:
             # pseudocode:
             # x = x + attn(ln(x)) + mlp(ln(x))
             # this means we can avoid doing the allreduce in the attn / mlp outputs
@@ -595,13 +594,9 @@ class ParallelTransformerLayer(MegatronModule):
             # due to a bug, the two layernorms are not tied in GPT-NeoX-20B. This is non-desirable, but
             # we preserve the functionality for backwards compatibility
             residual = hidden_states
-            # applies the correct normalization depending on if the norms are tied
-            if self.gpt_j_tied:
-                x = self.input_layernorm(hidden_states)
-                x1, x2 = x, x
-            else:
-                x1 = self.input_layernorm(hidden_states)
-                x2 = self.post_attention_layernorm(hidden_states)
+            # tie input- and post-layernorm
+            x = self.input_layernorm(hidden_states)
+            x1, x2 = x, x
 
             # Self attention.
             attention_output, attention_bias = \
@@ -634,7 +629,7 @@ class ParallelTransformerLayer(MegatronModule):
             # output = (x + attn(ln(x)) + mlp(ln(x)))
             output = residual + self.reduce(output)
 
-        # parallel layers not applied
+        # parallel-layers not applied
         else:
             # pseudocode:
             # x = x + attn(ln1(x))
