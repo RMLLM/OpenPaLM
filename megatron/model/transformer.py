@@ -460,7 +460,7 @@ def bias_dropout_add_fused_inference(x, bias, residual, prob):
 
 def dropout_add(x, tensor, prob, training):
     # type: (Tensor, Tensor, float, bool) -> Tensor
-    out = torch.nn.functional.dropout(x + tensor, p=prob, training=training)
+    out = torch.nn.functional.dropout(x, p=prob, training=training) + tensor
     return out
 
 
@@ -577,9 +577,9 @@ class ParallelTransformerLayer(MegatronModule):
         else:
             if self.dropout_fusion:
                 if self.training:
-                    bias_dropout_add_func = dropout_add_fused_train
+                    dropout_add_func = dropout_add_fused_train
                 else:
-                    bias_dropout_add_func = dropout_add_fused_inference
+                    dropout_add_func = dropout_add_fused_inference
             else:
                 dropout_add_func = get_dropout_add(self.training)
 
