@@ -537,8 +537,7 @@ class ParallelTransformerLayer(MegatronModule):
                 init_method,
                 output_layer_init_method,
                 layer_number,
-                attention_type=AttnType.cross_attn,
-                parallel_output=self.use_parallel_residual)
+                attention_type=AttnType.cross_attn)
             # Layernorm on the attention output.
             self.post_inter_attention_layernorm = LayerNorm(
                 args.hidden_size,
