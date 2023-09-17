@@ -609,22 +609,36 @@ class ParallelTransformerLayer(MegatronModule):
                 attention_output, _ = attention_output
 
             with torch.enable_grad():
-                attention_output = bias_dropout_add_func(
-                    attention_output,
-                    bias=attention_bias.expand_as(residual),
-                    residual=None,
-                    prob=self.hidden_dropout,
-                )
+                if attention_bias is not None:
+                    attention_output = bias_dropout_add_func(
+                        attention_output,
+                        bias=attention_bias.expand_as(residual),
+                        residual=None,
+                        prob=self.hidden_dropout,
+                    )
+                else:
+                    attention_output = torch.nn.functional.dropout(
+                        attention_output,
+                        p=self.hidden_dropout,
+                        training=self.training,
+                    )
 
             # MLP.
             mlp_output, mlp_bias = self.mlp(x2)
             with torch.enable_grad():
-                output = bias_dropout_add_func(
-                    mlp_output,
-                    bias=mlp_bias.expand_as(residual),
-                    residual=attention_output,
-                    prob=self.hidden_dropout,
-                )
+                if mlp_bias is not None:
+                    output = bias_dropout_add_func(
+                        mlp_output,
+                        bias=mlp_bias.expand_as(residual),
+                        residual=attention_output,
+                        prob=self.hidden_dropout,
+                    )
+                else:
+                    output = dropout_add_func(
+                        mlp_output,
+                        tensor=attention_output,
+                        prob=self.hidden_dropout,
+                    )
 
             # output = (x + attn(ln(x)) + mlp(ln(x)))
             output = residual + self.reduce(output)
