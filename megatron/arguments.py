@@ -442,6 +442,12 @@ def _add_network_size_args(parser):
     group.add_argument('--log-level-replica', type=str, choices=list(log_levels.keys()),
                        help="Logger log level to use on replicas. Same choices as ``log_level``"
                        )
+    group.add_argument('--gpt-j-residual', action="store_true",
+                       help="Use GPT-J parallel layers e.g. x = x + attn(ln1(x)) + mlp(ln2(x))"
+                       )
+    group.add_argument('--gpt-j-tied', action="store_true",
+                       help="Use GPT-J tied layer norms e.g. x = x + attn(ln(x)) + mlp(ln(x))"
+                       )
     return parser
 
 

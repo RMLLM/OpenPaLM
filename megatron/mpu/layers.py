@@ -378,7 +378,8 @@ class RowParallelLinear(torch.nn.Module):
                  input_is_parallel=False,
                  init_method=init.xavier_normal_, stride=1,
                  keep_master_weight_for_test=False,
-                 skip_bias_add=False):
+                 skip_bias_add=False,
+                 parallel_output=False):
         super(RowParallelLinear, self).__init__()
 
         # Keep input parameters
@@ -389,6 +390,8 @@ class RowParallelLinear(torch.nn.Module):
         world_size = get_tensor_model_parallel_world_size()
         self.input_size_per_partition = divide(input_size, world_size)
         self.skip_bias_add = skip_bias_add
+        # parallel_output is used to control whether the output is parallelized
+        self.parallel_output = parallel_output
 
         # Parameters.
         # Note: torch.nn.functional.linear performs XA^T + b and as a result
@@ -435,10 +438,12 @@ class RowParallelLinear(torch.nn.Module):
         # Matrix multiply.
         output_parallel = F.linear(input_parallel, self.weight)
         # All-reduce across all the partitions.
-        output_ = reduce_from_tensor_model_parallel_region(output_parallel)
-
-        if self.bias_tp_auto_sync:
-            torch.distributed.all_reduce(self.bias, op=torch.distributed.ReduceOp.AVG, group=mpu.get_tensor_model_parallel_group())
+        if not self.parallel_output:
+            output_ = reduce_from_tensor_model_parallel_region(output_parallel)
+            if self.bias_tp_auto_sync:
+                torch.distributed.all_reduce(self.bias, op=torch.distributed.ReduceOp.AVG, group=mpu.get_tensor_model_parallel_group())
+        else:
+            output_ = output_parallel
 
         if not self.skip_bias_add:
             output = output_ + self.bias if self.bias is not None else output_
