@@ -286,10 +286,16 @@ def parse_args(extra_args_provider=None, defaults={},
         # Activation function
         if args.glu_activation is not None and args.bias_gelu_fusion:
             raise ValueError("if glu-activation is used, please set --no-bias-gelu-fusion")
+        if args.glu_activation is not None and args.bias_silu_fusion:
+            raise ValueError("if glu-activation is used, please set --no-bias-silu-fusion")
         if args.gelu_fusion:
             if args.rank == 0:
                 print(f"args.gelu_fusion is set to False due to args.add_bias_linear is {args.add_bias_linear}")
             args.gelu_fusion = False
+        if args.silu_fusion:
+            if args.rank == 0:
+                print(f"args.silu_fusion is set to False due to args.add_bias_linear is {args.add_bias_linear}")
+            args.silu_fusion = False
         if args.dropout_fusion:
             if args.rank == 0:
                 print(f"args.dropout_fusion is set to False due to args.add_bias_linear is {args.add_bias_linear}")
@@ -299,6 +305,10 @@ def parse_args(extra_args_provider=None, defaults={},
             if args.rank == 0:
                 print(f"args.bias_gelu_fusion is set to False due to args.add_bias_linear is {args.add_bias_linear}")
             args.bias_gelu_fusion = False
+        if args.bias_silu_fusion:
+            if args.rank == 0:
+                print(f"args.bias_silu_fusion is set to False due to args.add_bias_linear is {args.add_bias_linear}")
+            args.bias_silu_fusion = False
         if args.bias_dropout_fusion:
             if args.rank == 0:
                 print(f"args.bias_dropout_fusion is set to False due to args.add_bias_linear is {args.add_bias_linear}")
@@ -392,6 +402,8 @@ def _add_network_size_args(parser):
     group.add_argument('--make-vocab-size-divisible-by', type=int, default=128,
                        help='Pad the vocab size to be divisible by this value.'
                        'This is added for computational efficieny reasons.')
+    group.add_argument('--multiple_of', type=int, default=256,
+                       help='multiple_of is used to compute the hidden dimension of the MLPSwiGLU')
     group.add_argument('--pad-vocab-size-to', type=int, default=None,
                        help='Pad the vocab size to this value.'
                        'This value must be greater than the initial size of the tokenizer'
@@ -577,12 +589,18 @@ def _add_training_args(parser):
     group.add_argument('--no-bias-gelu-fusion', action='store_false',
                        help='Disable bias and gelu fusion.',
                        dest='bias_gelu_fusion')
+    group.add_argument('--no-bias-silu-fusion', action='store_false',
+                       help='Disable bias and silu fusion.',
+                       dest='bias_silu_fusion')
     group.add_argument('--no-bias-dropout-fusion', action='store_false',
                        help='Disable bias and dropout fusion.',
                        dest='bias_dropout_fusion')
     group.add_argument('--no-gelu-fusion', action='store_false',
                        help='Disable gelu fusion.',
                        dest='gelu_fusion')
+    group.add_argument('--no-silu-fusion', action='store_false',
+                       help='Disable silu fusion.',
+                       dest='silu_fusion')
     group.add_argument('--no-dropout-fusion', action='store_false',
                        help='Disable dropout fusion.',
                        dest='dropout_fusion')
