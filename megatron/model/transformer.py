@@ -493,7 +493,6 @@ class ParallelTransformerLayer(MegatronModule):
                  layer_number, layer_type=LayerType.encoder,
                  self_attn_mask_type=AttnMaskType.padding):
         args = get_args()
-        self.use_bias = args.add_bias_linear
 
         super(ParallelTransformerLayer, self).__init__()
         self.layer_number = layer_number
@@ -506,6 +505,7 @@ class ParallelTransformerLayer(MegatronModule):
         self.fp32_residual_connection = args.fp32_residual_connection
         # parallel-layer arg
         self.use_parallel_residual = args.use_parallel_residual
+        self.add_bias_linear = args.add_bias_linear
         if self.use_parallel_residual:
             self.reduce = mpu.mappings.reduce_from_tensor_model_parallel_region
 
@@ -533,6 +533,7 @@ class ParallelTransformerLayer(MegatronModule):
                 args.hidden_size,
                 eps=args.layernorm_epsilon)
 
+        # NOTE: Below code block is not used.
         if self.layer_type == LayerType.decoder:
             self.inter_attention = ParallelAttention(
                 init_method,
@@ -566,22 +567,21 @@ class ParallelTransformerLayer(MegatronModule):
         # trigerring the fusion kernel. For now, we use two
         # different nn.functional routines to account for varying
         # dropout semantics during training and inference phases.
-        if self.use_bias:
-            if self.bias_dropout_fusion:
-                if self.training:
-                    bias_dropout_add_func = bias_dropout_add_fused_train
-                else:
-                    bias_dropout_add_func = bias_dropout_add_fused_inference
+        if self.bias_dropout_fusion:
+            if self.training:
+                bias_dropout_add_func = bias_dropout_add_fused_train
             else:
-                bias_dropout_add_func = get_bias_dropout_add(self.training)
+                bias_dropout_add_func = bias_dropout_add_fused_inference
         else:
-            if self.dropout_fusion:
-                if self.training:
-                    dropout_add_func = dropout_add_fused_train
-                else:
-                    dropout_add_func = dropout_add_fused_inference
+            bias_dropout_add_func = get_bias_dropout_add(self.training)
+
+        if self.dropout_fusion:
+            if self.training:
+                dropout_add_func = dropout_add_fused_train
             else:
-                dropout_add_func = get_dropout_add(self.training)
+                dropout_add_func = dropout_add_fused_inference
+        else:
+            dropout_add_func = get_dropout_add(self.training)
 
         # hidden_states: [b, s, h]
         # apply PaLM (gpt-j) style parallel-layers
@@ -608,40 +608,29 @@ class ParallelTransformerLayer(MegatronModule):
             if get_key_value:
                 attention_output, _ = attention_output
 
-            with torch.enable_grad():
-                if attention_bias is not None:
-                    attention_output = bias_dropout_add_func(
-                        attention_output,
-                        bias=attention_bias.expand_as(residual),
-                        residual=None,
-                        prob=self.hidden_dropout,
-                    )
-                else:
-                    attention_output = torch.nn.functional.dropout(
-                        attention_output,
-                        p=self.hidden_dropout,
-                        training=self.training,
-                    )
-
             # MLP.
             mlp_output, mlp_bias = self.mlp(x2)
-            with torch.enable_grad():
-                if mlp_bias is not None:
-                    output = bias_dropout_add_func(
-                        mlp_output,
-                        bias=mlp_bias.expand_as(residual),
-                        residual=attention_output,
-                        prob=self.hidden_dropout,
-                    )
-                else:
-                    output = dropout_add_func(
-                        mlp_output,
-                        tensor=attention_output,
-                        prob=self.hidden_dropout,
-                    )
 
             # output = (x + attn(ln(x)) + mlp(ln(x)))
-            output = residual + self.reduce(output)
+            output = self.reduce(attention_output + mlp_output)
+
+            with torch.enable_grad():
+                if attention_bias is not None and mlp_bias is not None:
+                    bias = (attention_bias + mlp_bias).expand_as(output)
+                    output = bias_dropout_add_func(
+                        output,
+                        bias,
+                        residual,
+                        self.hidden_dropout
+                    )
+                elif attention_bias is None and mlp_bias is None:
+                    output = dropout_add_func(
+                        output,
+                        residual,
+                        self.hidden_dropout
+                    )
+                else:
+                    raise NotImplementedError("attention_bias and mlp_bias must both be None or not None")
 
         # parallel-layers not applied
         else:
@@ -704,11 +693,17 @@ class ParallelTransformerLayer(MegatronModule):
 
                 # re-enable torch grad to enable fused optimization.
                 with torch.enable_grad():
-                    layernorm_input = bias_dropout_add_func(
-                        attention_output,
-                        attention_bias.expand_as(residual),
-                        residual,
-                        self.hidden_dropout)
+                    if attention_bias is not None:
+                        layernorm_input = bias_dropout_add_func(
+                            attention_output,
+                            attention_bias.expand_as(residual),
+                            residual,
+                            self.hidden_dropout)
+                    else:
+                        layernorm_input = dropout_add_func(
+                            attention_output,
+                            residual,
+                            self.hidden_dropout)
 
                 # Layer norm post the decoder attention
                 layernorm_output = self.post_inter_attention_layernorm(layernorm_input)
