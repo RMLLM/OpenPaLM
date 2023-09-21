@@ -21,27 +21,21 @@ torch._C._jit_set_profiling_executor(False)
 torch._C._jit_override_can_fuse_on_cpu(True)
 torch._C._jit_override_can_fuse_on_gpu(True)
 
-###### BIAS GELU FUSION/ NO AUTOGRAD ################
-# 1/sqrt(2*pi)-> 0.3989423
-# 1/sqrt(2)   -> 0.70710678
-# sqrt(2/pi)  -> 0.79788456
-# this function is tanh approximation of gelu
-# actual gelu is:
-# x * 0.5 * (1.0 + torch.erf(x * 0.70710678))
+###### BIAS SILU FUSION/ NO AUTOGRAD ################
+# actual silu is:
+# x * F.sigmoid(x)
 
 @torch.jit.script
 def silu(x):
     return x * F.sigmoid(x)
 
-# gradient of tanh approximation of gelu
-# gradient of actual gelu is:
-# 0.5 * (1. + torch.erf(x * 0.70710678)) + 0.3989423 * x * torch.exp(-0.5 * x * x)
+# gradient of actual silu is:
+# F.sigmoid(x) + silu(x) * (1 - F.sigmoid(x))
 @torch.jit.script
 def silu_back(g, x):
-    tanh_out = torch.tanh(0.79788456 * x * (1 + 0.044715 * x * x))
-    # sqrt(2/pi) * 3 * 0.044715 -> 0.1070322243
-    ff = 0.5 * x * ((1 - tanh_out * tanh_out) * (0.79788456 + 0.1070322243 * x * x)) + 0.5 * (1 + tanh_out)
-    return ff*g
+    silu_out = x * F.sigmoid(x)
+    sigmoid_out = F.sigmoid(x)
+    return sigmoid_out + silu_out * (1 - sigmoid_out)
 
 class SiLUFunction(torch.autograd.Function):
     @staticmethod
