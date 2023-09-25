@@ -24,9 +24,9 @@ class RotaryEmbedding(torch.nn.Module):
             emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
             if self.precision == torch.bfloat16:
                 emb = emb.float()
-            # [sx, 1 (b * np), hn]
-            self.cos_cached = emb.cos()[:, None, :]
-            self.sin_cached = emb.sin()[:, None, :]
+            # [sx, 1, 1, hn]
+            self.cos_cached = emb.cos()[:, None, None, :]
+            self.sin_cached = emb.sin()[:, None, None, :]
             if self.precision == torch.bfloat16:
                 self.cos_cached = self.cos_cached.bfloat16()
                 self.sin_cached = self.sin_cached.bfloat16()
