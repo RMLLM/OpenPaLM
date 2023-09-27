@@ -503,9 +503,10 @@ class ParallelTransformerLayer(MegatronModule):
 
         self.bf16 = args.bf16
         self.fp32_residual_connection = args.fp32_residual_connection
+        
+        self.use_bias = args.add_bias_linear
         # parallel-layer arg
         self.use_parallel_residual = args.use_parallel_residual
-        self.use_bias = args.add_bias_linear
         if self.use_parallel_residual:
             self.reduce = mpu.mappings.reduce_from_tensor_model_parallel_region
 
