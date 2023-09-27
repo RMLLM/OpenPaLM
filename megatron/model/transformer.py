@@ -505,7 +505,7 @@ class ParallelTransformerLayer(MegatronModule):
         self.fp32_residual_connection = args.fp32_residual_connection
         # parallel-layer arg
         self.use_parallel_residual = args.use_parallel_residual
-        self.add_bias_linear = args.add_bias_linear
+        self.use_bias = args.add_bias_linear
         if self.use_parallel_residual:
             self.reduce = mpu.mappings.reduce_from_tensor_model_parallel_region
 
@@ -567,21 +567,22 @@ class ParallelTransformerLayer(MegatronModule):
         # trigerring the fusion kernel. For now, we use two
         # different nn.functional routines to account for varying
         # dropout semantics during training and inference phases.
-        if self.bias_dropout_fusion:
-            if self.training:
-                bias_dropout_add_func = bias_dropout_add_fused_train
+        if self.use_bias:
+            if self.bias_dropout_fusion:
+                if self.training:
+                    bias_dropout_add_func = bias_dropout_add_fused_train
+                else:
+                    bias_dropout_add_func = bias_dropout_add_fused_inference
             else:
-                bias_dropout_add_func = bias_dropout_add_fused_inference
+                bias_dropout_add_func = get_bias_dropout_add(self.training)
         else:
-            bias_dropout_add_func = get_bias_dropout_add(self.training)
-
-        if self.dropout_fusion:
-            if self.training:
-                dropout_add_func = dropout_add_fused_train
+            if self.dropout_fusion:
+                if self.training:
+                    dropout_add_func = dropout_add_fused_train
+                else:
+                    dropout_add_func = dropout_add_fused_inference
             else:
-                dropout_add_func = dropout_add_fused_inference
-        else:
-            dropout_add_func = get_dropout_add(self.training)
+                dropout_add_func = get_dropout_add(self.training)
 
         # hidden_states: [b, s, h]
         # apply PaLM (gpt-j) style parallel-layers
