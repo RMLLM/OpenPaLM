@@ -50,14 +50,11 @@ except ImportError:
 
 try:
     import flash_attn as _flash_attn
-    if Version(getattr(_flash_attn, "__version__", "1")) >= Version("2"):
-        from flash_attn.flash_attn_interface import flash_attn_func
-        FLASH_VERSION = 2
-    else:
-        from flash_attn.flash_attn_interface import flash_attn_unpadded_func
-        FLASH_VERSION = 1
+    # Only supports flash version 2 or later. Flash version 1 is not supported. 
+    assert Version(getattr(_flash_attn, "__version__", "1")) >= Version("2")
+    from flash_attn.flash_attn_interface import flash_attn_func
 except ImportError:
-    FLASH_VERSION = None
+    flash_attn_func = None
 
 
 """ We use the following notation throughout this file:
@@ -141,7 +138,6 @@ class ParallelMLP(MegatronModule):
 # Copied from https://github.com/bigcode-project/Megatron-LM/blob/multi-query-attention/megatron/model/transformer.py#L503-L583
 class FlashSelfAttention(torch.nn.Module):
     """Implement the scaled dot product attention with softmax.
-    This class is for flash attention version 2 by default.
     Arguments
     ---------
         softmax_scale: The temperature to use for the softmax attention.
@@ -153,7 +149,7 @@ class FlashSelfAttention(torch.nn.Module):
     def __init__(self, causal=False, softmax_scale=None, attention_dropout=0.0,
                  device=None, dtype=None):
         super().__init__()
-        assert FLASH_VERSION is not None, ('Please install FlashAttention first, '
+        assert flash_attn_func is not None, ('Please install FlashAttention first, '
                                                       'e.g., with pip install flash-attn')
         assert rearrange is not None, 'Please install einops first, e.g., with pip install einops'
         self.causal = causal
@@ -168,10 +164,6 @@ class FlashSelfAttention(torch.nn.Module):
         """
         assert all((i.dtype in [torch.float16, torch.bfloat16] for i in (q,k,v)))
         assert all((i.is_cuda for i in (q,k,v)))
-
-        # If version 1 is completely unnecessary, it should be deprecated.
-        if FLASH_VERSION==1:
-            return self._forward_v1(q,k,v)
 
         seqlen_q, seqlen_k = q.shape[1], k.shape[1]
 
@@ -188,39 +180,6 @@ class FlashSelfAttention(torch.nn.Module):
 
         output = flash_attn_func(q, k, v, dropout_p,softmax_scale=self.softmax_scale, causal=is_causal)
 
-        return output
-
-    # If version 1 is completely unnecessary, it should be deprecated.
-    def _forward_v1(self, q, k, v):
-        batch_size, seqlen_q = q.shape[0], q.shape[1]
-        seqlen_k = k.shape[1]
-
-        q, k, v = [rearrange(x, 'b s ... -> (b s) ...') for x in [q, k, v]]
-        cu_seqlens_q = torch.arange(0, (batch_size + 1) * seqlen_q, step=seqlen_q, dtype=torch.int32,
-                                    device=q.device)
-
-        if self.training:
-            # during training q,k,v always have same seqlen
-            assert seqlen_k == seqlen_q
-
-            is_causal = self.causal
-            cu_seqlens_k = cu_seqlens_q
-            dropout_p = self.dropout_p
-        else:
-            # turn off FA causal mask after first inference autoregressive iteration
-            # only on first autoregressive step q,k,v have same seqlen
-            is_causal = self.causal and (seqlen_q == seqlen_k)
-            cu_seqlens_k = torch.arange(0, (batch_size + 1) * seqlen_k, step=seqlen_k, dtype=torch.int32,
-                        device=q.device)
-            dropout_p = 0
-
-        output = flash_attn_unpadded_func(
-            q, k, v, cu_seqlens_q, cu_seqlens_k, seqlen_q, seqlen_k,
-            dropout_p,
-            softmax_scale=self.softmax_scale, causal=is_causal
-        )
-
-        output = rearrange(output, '(b s) ... -> b s ...', b=batch_size)
         return output
 
 
@@ -308,7 +267,7 @@ class ParallelAttention(MegatronModule):
             raise ValueError(f"Invalid attention arguments: {attention_type}, {self.attention_head_type}")
             
         if self.use_flash_attn:
-            if FLASH_VERSION is None:
+            if flash_attn_func is None:
                 raise ImportError('FlashAttention is not installed, please install with '
                                   'pip install flash-attn')
             assert attention_type == AttnType.self_attn, ('FlashAttention code path only supports '
@@ -460,12 +419,6 @@ class ParallelAttention(MegatronModule):
             query_layer, key_layer = apply_rotary_fn(query_layer, key_layer, cos, sin, offset=offset)
 
         if self.use_flash_attn:
-            if self.attention_head_type == "multiquery" and FLASH_VERSION == 1:
-                sq, b, np, hn = query_layer.size()
-                # Expand kv to be compatible with flash 1 implementation
-                # [sq, b, 1, hn] -> [sq, b, np, hn]
-                key_layer = key_layer.expand((sq, b, np, hn))
-                value_layer = value_layer.expand((sq, b, np, hn))
             q, k, v = [rearrange(x, 's b ... -> b s ...').contiguous()
                        for x in (query_layer, key_layer, value_layer)]
             with mpu.get_cuda_rng_tracker().fork():
@@ -608,6 +561,7 @@ class ParallelAttention(MegatronModule):
                     (self.hidden_size_per_partition,)
                 context_layer = context_layer.view(*new_context_layer_shape)
 
+            # Copied from https://github.com/bigcode-project/Megatron-LM/blob/multi-query-attention/megatron/model/transformer.py#L382-L500
             elif self.attention_head_type == "multiquery":
                 # Only one head for key and values
                 assert key_layer.size(2) == 1 and value_layer.size(2) == 1
