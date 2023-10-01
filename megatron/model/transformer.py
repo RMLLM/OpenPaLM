@@ -50,11 +50,14 @@ except ImportError:
 
 try:
     import flash_attn as _flash_attn
-    # Only supports flash version 2 or later. Flash version 1 is not supported. 
-    assert Version(getattr(_flash_attn, "__version__", "1")) >= Version("2")
     from flash_attn.flash_attn_interface import flash_attn_func
 except ImportError:
     flash_attn_func = None
+    
+try:
+    assert Version(getattr(_flash_attn, "__version__", "1")) >= Version("2")    
+except:
+    print("Only supports flash version 2 or later. Flash version 1 is not supported.")
 
 
 """ We use the following notation throughout this file:
