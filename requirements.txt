@@ -1,14 +1,17 @@
+--extra-index-url https://download.pytorch.org/whl/cu117
+torch==1.13.1+cu117
 datasets
 nltk
-numpy
 parameterized
 pybind11
 regex
 six
-tensorboard
-torch>=1.7
-transformers
-DeepSpeed @ git+https://github.com/microsoft/DeepSpeed.git
-# versions from HF transformers
-black==21.4b0
+packaging
 isort>=5.5.4
+black==21.4b0
+tensorboard==2.9.1
+einops==0.6.1
+numpy==1.22.4
+transformers==4.30.2
+deepspeed==0.8.3
+pydantic==1.10.12
