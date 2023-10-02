@@ -261,8 +261,8 @@ def parse_args(extra_args_provider=None, defaults={},
             assert args.max_position_embeddings >= args.seq_length
         if args.decoder_seq_length is not None:
             assert args.max_position_embeddings >= args.decoder_seq_length
-    else:
-        assert args.max_position_embeddings is None
+    # else:
+    #     assert args.max_position_embeddings is None
 
     if args.lr is not None:
         assert args.min_lr <= args.lr
@@ -431,6 +431,9 @@ def _add_network_size_args(parser):
                        default=PositionEmbeddingType.absolute,
                        help='Define position embedding type ("absolute" | "rotary"). "absolute" by default.'
                        )
+    group.add_argument('--rope_theta', type=float,
+                        default=10000.0,
+                        help='The base period of the RoPE embeddings. Only this value is valid when using rotary.')
     group.add_argument('--glu-activation', type=str,
                        choices=megatron.model.glu_activations.GLU_ACTIVATIONS.keys(),
                        help='GLU activations to use.'
