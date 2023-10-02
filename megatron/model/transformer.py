@@ -201,7 +201,7 @@ class ParallelMLPSwiGLU(MegatronModule):
     Note: multiple_of is used to compute the hidden dimension of the MLP
     """
 
-    def __init__(self, init_method, output_layer_init_method):
+    def __init__(self, init_method, output_layer_init_method, parallel_output=False):
         super(ParallelMLPSwiGLU, self).__init__()
         args = get_args()
 
@@ -238,7 +238,8 @@ class ParallelMLPSwiGLU(MegatronModule):
             bias=args.add_bias_linear,
             input_is_parallel=True,
             init_method=output_layer_init_method,
-            skip_bias_add=True)
+            skip_bias_add=True,
+            parallel_output=parallel_output)
 
     def forward(self, hidden_states):
         # [s, b, ]
@@ -863,10 +864,17 @@ class ParallelTransformerLayer(MegatronModule):
                 args.hidden_size,
                 eps=args.layernorm_epsilon)
 
-        # MLP
-        self.mlp = ParallelMLP(init_method,
-                               output_layer_init_method,
-                               parallel_output=self.use_parallel_residual)
+        # MLP (ParallelMLPSwiGLU if SwiGLU used)
+        if args.use_swiglu:
+            self.mlp = ParallelMLPSwiGLU(
+                init_method,
+                output_layer_init_method,
+                parallel_output=self.use_parallel_residual)
+        else:
+            self.mlp = ParallelMLP(
+                init_method,
+                output_layer_init_method,
+                parallel_output=self.use_parallel_residual)
 
         # Alibi
         # if args.position_embedding_type == PositionEmbeddingType.alibi:

@@ -284,10 +284,12 @@ def parse_args(extra_args_provider=None, defaults={},
 
     if args.add_bias_linear:
         # Activation function
+        """
         if args.glu_activation is not None and args.bias_gelu_fusion:
             raise ValueError("if glu-activation is used, please set --no-bias-gelu-fusion")
         if args.glu_activation is not None and args.bias_silu_fusion:
             raise ValueError("if glu-activation is used, please set --no-bias-silu-fusion")
+        """
         if args.gelu_fusion:
             if args.rank == 0:
                 print(f"args.gelu_fusion is set to False due to args.add_bias_linear is {args.add_bias_linear}")
@@ -443,10 +445,14 @@ def _add_network_size_args(parser):
                        default=PositionEmbeddingType.absolute,
                        help='Define position embedding type ("absolute" | "rotary"). "absolute" by default.'
                        )
+    """
     group.add_argument('--glu-activation', type=str,
                        choices=megatron.model.glu_activations.GLU_ACTIVATIONS.keys(),
                        help='GLU activations to use.'
                        )
+    """
+    group.add_argument('--use-swiglu', action="store_true",
+                       help="Use Swiglu as activation and ParallelMLPSwiGLU layer as MLP ")
     group.add_argument('--kill-switch-path', type=str,
                        help='path to look for a kill switch, which if found will automatically exit the program'
                        )
