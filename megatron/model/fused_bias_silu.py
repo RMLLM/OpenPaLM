@@ -23,7 +23,7 @@ torch._C._jit_override_can_fuse_on_gpu(True)
 
 ###### BIAS SILU FUSION/ NO AUTOGRAD ################
 # actual silu is:
-# x * F.sigmoid(x)x
+# x * F.sigmoid(x)
 
 @torch.jit.script
 def bias_silu(bias, y):
@@ -37,7 +37,6 @@ def bias_silu_back(g, bias, y):
     x = bias + y
     silu_out = x * F.sigmoid(x)
     sigmoid_out = F.sigmoid(x)
-    # sqrt(2/pi) * 3 * 0.044715 -> 0.1070322243
     return sigmoid_out + silu_out * (1 - sigmoid_out)
     
 

@@ -190,24 +190,21 @@ class FlashSelfAttention(torch.nn.Module):
 
 
 class ParallelMLPSwiGLU(MegatronModule):
-    """MLP.
+    """ParallelMLPSwiGLU.
 
-    MLP will take the input with h hidden state, project it to 4*h
-    hidden dimension, perform nonlinear transformation, and project the
-    state back into h hidden dimension. At the end, dropout is also
-    applied.
+    ParallelMLPSwiGLU will take the input with h hidden state, 
+    project it to 4*h hidden dimension, 
+    perform nonlinear transformation, 
+    and project the state back into h hidden dimension. 
+    At the end, dropout is also applied.
+
+    Note: multiple_of is used to compute the hidden dimension of the MLP
     """
 
     def __init__(self, init_method, output_layer_init_method):
         super(ParallelMLPSwiGLU, self).__init__()
         args = get_args()
 
-        # MLP will take the input with h hidden state, project it to 4*h
-        # hidden dimension, perform nonlinear transformation, and project the
-        # state back into h hidden dimension. At the end, dropout is also applied.
-        # 
-        # Note: multiple_of is used to compute the hidden dimension of the MLP
-        
         self.multiple_of = args.multiple_of
         
         ffn_hidden_size = int(2 * args.hidden_size * 4 / 3)
@@ -217,10 +214,10 @@ class ParallelMLPSwiGLU(MegatronModule):
         self.gate_proj = mpu.ColumnParallelLinear(
             args.hidden_size,
             ffn_hidden_size,
-            bias=args.add_bias_linear,
+            bias=args.add_bias_linear,      # Initialize bias in FFN
             gather_output=False,
             init_method=init_method,
-            skip_bias_add=True)
+            skip_bias_add=True)             # However, no bias exists in FFN outputs 
         
         self.up_proj = mpu.ColumnParallelLinear(
             args.hidden_size,
