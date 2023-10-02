@@ -35,7 +35,8 @@ def silu(x):
 def silu_back(g, x):
     silu_out = x * torch.sigmoid(x)
     sigmoid_out = torch.sigmoid(x)
-    return sigmoid_out + silu_out * (1 - sigmoid_out)
+    ff = sigmoid_out + silu_out * (1 - sigmoid_out)
+    return g * ff
 
 class SiLUFunction(torch.autograd.Function):
     @staticmethod

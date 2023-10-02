@@ -245,16 +245,17 @@ class ParallelMLPSwiGLU(MegatronModule):
         # [s, b, ]
         gate_parallel, gate_bias_parallel = self.gate_proj(hidden_states)
 
-        if gate_bias_parallel is not None:
-            if self.bias_silu_fusion:
-                gate_parallel = bias_silu_impl(gate_parallel, gate_bias_parallel)
+        with torch.enable_grad():
+            if gate_bias_parallel is not None:
+                if self.bias_silu_fusion:
+                    gate_parallel = bias_silu_impl(gate_parallel, gate_bias_parallel)
+                else:
+                    gate_parallel = self.activation_func(gate_parallel + gate_bias_parallel)
             else:
-                gate_parallel = self.activation_func(gate_parallel + gate_bias_parallel)
-        else:
-            if self.silu_fusion:
-                gate_parallel = silu_impl(gate_parallel)
-            else:
-                gate_parallel = self.activation_func(gate_parallel)
+                if self.silu_fusion:
+                    gate_parallel = silu_impl(gate_parallel)
+                else:
+                    gate_parallel = self.activation_func(gate_parallel)
         
         # [s, b, ]
         up_parallel, up_bias_parallel = self.up_proj(hidden_states)
