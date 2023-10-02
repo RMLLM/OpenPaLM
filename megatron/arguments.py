@@ -403,8 +403,6 @@ def _add_network_size_args(parser):
     group.add_argument('--make-vocab-size-divisible-by', type=int, default=128,
                        help='Pad the vocab size to be divisible by this value.'
                        'This is added for computational efficieny reasons.')
-    group.add_argument('--multiple_of', type=int, default=256,
-                       help='multiple_of is used to compute the hidden dimension of the MLPSwiGLU')
     group.add_argument('--pad-vocab-size-to', type=int, default=None,
                        help='Pad the vocab size to this value.'
                        'This value must be greater than the initial size of the tokenizer'
@@ -447,12 +445,14 @@ def _add_network_size_args(parser):
     group.add_argument('--rope_theta', type=float,
                         default=10000.0,
                         help='The base period of the RoPE embeddings. Only this value is valid when using rotary.')    
-    # group.add_argument('--glu-activation', type=str,
-    #                    choices=megatron.model.glu_activations.GLU_ACTIVATIONS.keys(),
-    #                    help='GLU activations to use.'
-    #                    )
+    group.add_argument('--glu-activation', type=str,
+                       choices=megatron.model.glu_activations.GLU_ACTIVATIONS.keys(),
+                       help='GLU activations to use.'
+                       )
     group.add_argument('--use-swiglu', action="store_true",
                        help="Use Swiglu as activation and ParallelMLPSwiGLU layer as MLP ")
+    group.add_argument('--swiglu-multiple-of', type=int, default=256,
+                       help='swiglu-multiple-of is used to compute the hidden dimension of the MLPSwiGLU')
     group.add_argument('--kill-switch-path', type=str,
                        help='path to look for a kill switch, which if found will automatically exit the program'
                        )

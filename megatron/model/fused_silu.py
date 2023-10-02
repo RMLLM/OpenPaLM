@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import torch
-import torch.nn.functional as F
+# import torch.nn.functional as F
 
 torch._C._jit_set_profiling_mode(False)
 torch._C._jit_set_profiling_executor(False)
@@ -27,14 +27,14 @@ torch._C._jit_override_can_fuse_on_gpu(True)
 
 @torch.jit.script
 def silu(x):
-    return x * F.sigmoid(x)
+    return x * torch.sigmoid(x)
 
 # gradient of actual silu is:
 # F.sigmoid(x) + silu(x) * (1 - F.sigmoid(x))
 @torch.jit.script
 def silu_back(g, x):
-    silu_out = x * F.sigmoid(x)
-    sigmoid_out = F.sigmoid(x)
+    silu_out = x * torch.sigmoid(x)
+    sigmoid_out = torch.sigmoid(x)
     return sigmoid_out + silu_out * (1 - sigmoid_out)
 
 class SiLUFunction(torch.autograd.Function):
